@@ -1,0 +1,7 @@
+FROM jupyter/pyspark-notebook:latest
+
+# Copy file requirements vào container
+COPY requirements.txt /tmp/
+
+# Cài đặt các thư viện dưới quyền user mặc định (jovyan)
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
