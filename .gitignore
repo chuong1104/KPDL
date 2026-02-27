@@ -1,0 +1,33 @@
+# .gitignore
+
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Data (quá lớn để commit)
+data/
+*.parquet
+*.jsonl
+*.json.gz
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Model files (lớn)
+*.model
+spark-warehouse/
+
+# VSCode local settings (tùy chọn - có thể commit nếu muốn share settings)
+.vscode/settings.json
+
+# macOS
+.DS_Store
+
+# MinIO local data (nếu mount vào thư mục project)
+minio-data/
