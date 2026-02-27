@@ -1,8 +1,5 @@
 # docker-compose.yml
 # Đặt ở thư mục gốc dự án (cùng cấp với .env)
-
-version: '3.8'
-
 services:
 
   # ── MinIO Data Lake ─────────────────────────────────────────────
@@ -45,39 +42,35 @@ services:
     restart: 'no'   # Chỉ chạy 1 lần khi compose up
 # ── Spark Master ─────────────────────────────────────────────────
   spark-master:
-    image: bitnami/spark:3.5
+    image: apache/spark:3.5.1
     container_name: electronics-spark-master
     environment:
-      SPARK_MODE: master
-      SPARK_RPC_AUTHENTICATION_ENABLED: 'no'
-      SPARK_RPC_ENCRYPTION_ENABLED: 'no'
-      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: 'no'
-      SPARK_SSL_ENABLED: 'no'
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_SECURE: ${MINIO_SECURE}
+      SPARK_MASTER: spark://spark-master:7077
+      SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY}
+      SPARK_EXECUTOR_MEMORY: ${SPARK_EXECUTOR_MEMORY}
+      SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS}
     ports:
-      - '8080:8080'    # Spark Master Web UI
-      - '7077:7077'    # Spark Master port (cho worker kết nối)
+      - "8080:8080"
+      - "7077:7077"
     volumes:
-      - ./notebooks:/opt/bitnami/spark/notebooks
-      - ./src:/opt/bitnami/spark/src
+      - ./notebooks:/opt/spark/notebooks
+      - ./src:/opt/spark/src
     restart: unless-stopped
 # ── Spark Worker ─────────────────────────────────────────────────
   spark-worker:
-    image: bitnami/spark:3.5
+    image: apache/spark:3.5.1
     container_name: electronics-spark-worker
     environment:
-      SPARK_MODE: worker
       SPARK_MASTER_URL: spark://spark-master:7077
-      SPARK_WORKER_MEMORY: 4G
-      SPARK_WORKER_CORES: 2
-      SPARK_RPC_AUTHENTICATION_ENABLED: 'no'
-      SPARK_RPC_ENCRYPTION_ENABLED: 'no'
-      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: 'no'
-      SPARK_SSL_ENABLED: 'no'
     ports:
-      - '8081:8081'    # Spark Worker Web UI
+      - "8081:8081"
     volumes:
-      - ./notebooks:/opt/bitnami/spark/notebooks
-      - ./src:/opt/bitnami/spark/src
+      - ./notebooks:/opt/spark/notebooks
+      - ./src:/opt/spark/src
     depends_on:
       - spark-master
     restart: unless-stopped
