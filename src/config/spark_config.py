@@ -13,7 +13,21 @@ def create_spark_session(app_name: str = 'ElectronicsRecommendation') -> SparkSe
     raw_endpoint = os.getenv('MINIO_ENDPOINT', 'localhost:9000')
     clean_endpoint = raw_endpoint.replace('http://', '').replace('https://', '')
     
-    # Xác định giao thức (http hoặc https)
+    # ── FIX: Tự động detect môi trường ──────────────────────────
+    def _is_running_in_docker() -> bool:
+        return (
+            os.path.exists('/.dockerenv')
+            or os.environ.get('JUPYTER_IN_DOCKER', '') == 'true'
+        )
+
+    if not _is_running_in_docker():
+        import re
+        clean_endpoint = re.sub(
+            r'^[a-zA-Z_-]+:(\d+)$',
+            lambda m: f"localhost:{m.group(1)}",
+            clean_endpoint
+        )
+
     is_secure = str(os.getenv('MINIO_SECURE', 'false')).lower() == 'true'
     protocol = 'https://' if is_secure else 'http://'
     spark_s3a_endpoint = f'{protocol}{clean_endpoint}'

@@ -2,6 +2,7 @@
 import os
 from minio import Minio
 from dotenv import load_dotenv
+import re
 
 load_dotenv()
 
@@ -18,6 +19,24 @@ def get_minio_client() -> Minio:
     
     # Ép kiểu secure thành boolean
     is_secure = str(os.getenv('MINIO_SECURE', 'false')).lower() == 'true'
+
+    # ── FIX: Tự động detect môi trường ──────────────────────────
+    # Nếu chạy từ local (không phải trong Docker container),
+    # thay "minio" → "localhost"
+    def _is_running_in_docker() -> bool:
+        """Trả về True nếu đang chạy bên trong Docker container."""
+        return (
+            os.path.exists('/.dockerenv')
+            or os.environ.get('JUPYTER_IN_DOCKER', '') == 'true'
+        )
+
+    if not _is_running_in_docker():
+        # Thay toàn bộ hostname Docker bằng localhost
+        clean_endpoint = re.sub(
+            r'^[a-zA-Z_-]+:(\d+)$',   # pattern: "minio:9000"
+            lambda m: f"localhost:{m.group(1)}",
+            clean_endpoint
+        )
 
     return Minio(
         endpoint   = clean_endpoint,
