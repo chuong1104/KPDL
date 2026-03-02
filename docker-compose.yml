@@ -16,6 +16,11 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
     restart: unless-stopped
 
   minio-init:
@@ -43,7 +48,7 @@ services:
     user: root
     environment:
       - SPARK_MASTER_HOST=spark-master
-      - SPARK_DRIVER_MEMORY=${SPARK_DRIVER_MEMORY}
+      - SPARK_DAEMON_MEMORY=512m
     ports:
       - "8080:8080"
       - "7077:7077"
@@ -51,13 +56,20 @@ services:
       - ./notebooks:/opt/spark/notebooks
       - ./src:/opt/spark/src
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
     restart: unless-stopped
 
-  spark-worker:
+  spark-worker-1:
     image: apache/spark:3.5.1
-    container_name: electronics-spark-worker
+    container_name: electronics-spark-worker-1
     user: root
     environment:
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES}
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY}
       - SPARK_EXECUTOR_MEMORY=${SPARK_EXECUTOR_MEMORY}
     ports:
       - "8081:8081"
@@ -67,15 +79,42 @@ services:
     depends_on:
       - spark-master
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    deploy:
+      resources:
+        limits:
+          cpus: '3'
+          memory: 3584M
+    restart: unless-stopped
+
+  spark-worker-2:
+    image: apache/spark:3.5.1
+    container_name: electronics-spark-worker-2
+    user: root
+    environment:
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES}
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY}
+      - SPARK_EXECUTOR_MEMORY=${SPARK_EXECUTOR_MEMORY}
+    ports:
+      - "8082:8081"
+    volumes:
+      - ./notebooks:/opt/spark/notebooks
+      - ./src:/opt/spark/src
+    depends_on:
+      - spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    deploy:
+      resources:
+        limits:
+          cpus: '3'
+          memory: 3584M
     restart: unless-stopped
 
   jupyter:
     image: jupyter/pyspark-notebook:latest
     container_name: electronics-jupyter
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile.jupyter
-  
     user: root
     environment:
       JUPYTER_ENABLE_LAB: "yes"
@@ -92,6 +131,13 @@ services:
       - ./src:/home/jovyan/work/src
     depends_on:
       - spark-master
+      - spark-worker-1
+      - spark-worker-2
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 3072M
     command: start-notebook.sh --NotebookApp.token='' --NotebookApp.password=''
 
 volumes:
