@@ -1,19 +1,19 @@
 import os
+import re
 from pyspark.sql import SparkSession
 from dotenv import load_dotenv
 
-load_dotenv()  # Đọc .env file
+load_dotenv()
+
 
 def create_spark_session(app_name: str = 'ElectronicsRecommendation') -> SparkSession:
     """
-    Tạo SparkSession với config tối ưu cho local development + MinIO.
-    Gọi hàm này 1 lần ở đầu mỗi notebook.
+    Tạo SparkSession tối ưu cho 2 workers (6C/12T, 16GB RAM).
+    Bronze KHÔNG persist — chỉ tồn tại trên RAM → ghi thẳng Silver.
     """
-    # Lấy và dọn dẹp endpoint (xóa http:// hoặc https:// nếu có để tránh lặp)
     raw_endpoint = os.getenv('MINIO_ENDPOINT', 'localhost:9000')
     clean_endpoint = raw_endpoint.replace('http://', '').replace('https://', '')
-    
-    # ── FIX: Tự động detect môi trường ──────────────────────────
+
     def _is_running_in_docker() -> bool:
         return (
             os.path.exists('/.dockerenv')
@@ -21,7 +21,6 @@ def create_spark_session(app_name: str = 'ElectronicsRecommendation') -> SparkSe
         )
 
     if not _is_running_in_docker():
-        import re
         clean_endpoint = re.sub(
             r'^[a-zA-Z_-]+:(\d+)$',
             lambda m: f"localhost:{m.group(1)}",
@@ -32,7 +31,7 @@ def create_spark_session(app_name: str = 'ElectronicsRecommendation') -> SparkSe
     protocol = 'https://' if is_secure else 'http://'
     spark_s3a_endpoint = f'{protocol}{clean_endpoint}'
 
-    minio_user     = os.getenv('MINIO_ROOT_USER', 'admin')
+    minio_user = os.getenv('MINIO_ROOT_USER', 'admin')
     minio_password = os.getenv('MINIO_ROOT_PASSWORD', 'password123')
 
     spark = (
@@ -40,46 +39,66 @@ def create_spark_session(app_name: str = 'ElectronicsRecommendation') -> SparkSe
         .appName(app_name)
         .master(os.getenv('SPARK_MASTER', 'local[*]'))
 
-        # ── Memory config ────────────────────────────────────
-        .config('spark.driver.memory',          os.getenv('SPARK_DRIVER_MEMORY', '4g'))
-        .config('spark.executor.memory',        os.getenv('SPARK_EXECUTOR_MEMORY', '4g'))
-        .config('spark.driver.maxResultSize',   '1g')
+        # ── Memory (tối ưu 16GB, 2 workers) ─────────────────
+        .config('spark.driver.memory',          os.getenv('SPARK_DRIVER_MEMORY', '2g'))
+        .config('spark.executor.memory',        os.getenv('SPARK_EXECUTOR_MEMORY', '2g'))
+        .config('spark.driver.maxResultSize',   '512m')
+        .config('spark.executor.cores',         '3')
+        .config('spark.memory.fraction',        '0.6')
+        .config('spark.memory.storageFraction',  '0.3')
 
-        # ── Shuffle optimization ─────────────────────────────
-        .config('spark.sql.shuffle.partitions',              os.getenv('SPARK_SHUFFLE_PARTITIONS', '8'))
-        .config('spark.default.parallelism',                 '8')
-        .config('spark.sql.adaptive.enabled',                'true')
+        # ── Shuffle (2 workers × 3 cores = 6 slots) ─────────
+        .config('spark.sql.shuffle.partitions',
+                os.getenv('SPARK_SHUFFLE_PARTITIONS', '12'))
+        .config('spark.default.parallelism',    '12')
+        .config('spark.sql.adaptive.enabled',   'true')
         .config('spark.sql.adaptive.coalescePartitions.enabled', 'true')
+        .config('spark.sql.adaptive.coalescePartitions.minPartitionNum', '4')
+        .config('spark.sql.adaptive.advisoryPartitionSizeInBytes', '128m')
 
-        # ── Serializer ───────────────────────────────────────
-        .config('spark.serializer', 'org.apache.spark.serializer.KryoSerializer')
+        # ── Parquet tối ưu ───────────────────────────────────
+        .config('spark.sql.parquet.compression.codec',  'zstd')
+        .config('spark.sql.parquet.mergeSchema',        'false')
+        .config('spark.sql.parquet.filterPushdown',     'true')
+        .config('spark.sql.files.maxPartitionBytes',    '128m')
+        .config('spark.sql.files.openCostInBytes',      '4m')
 
-        # ── MinIO / S3 connector (hadoop-aws) ────────────────
+        # ── Serializer ──────────────────────────────────────
+        .config('spark.serializer',
+                'org.apache.spark.serializer.KryoSerializer')
+
+        # ── MinIO / S3A connector ────────────────────────────
         .config('spark.jars.packages',
                 'org.apache.hadoop:hadoop-aws:3.3.4,'
                 'com.amazonaws:aws-java-sdk-bundle:1.12.262')
-        .config('spark.hadoop.fs.s3a.endpoint',         spark_s3a_endpoint)
-        .config('spark.hadoop.fs.s3a.access.key',       minio_user)
-        .config('spark.hadoop.fs.s3a.secret.key',       minio_password)
-        .config('spark.hadoop.fs.s3a.path.style.access', 'true')  # QUAN TRỌNG với MinIO
+        .config('spark.hadoop.fs.s3a.endpoint',          spark_s3a_endpoint)
+        .config('spark.hadoop.fs.s3a.access.key',        minio_user)
+        .config('spark.hadoop.fs.s3a.secret.key',        minio_password)
+        .config('spark.hadoop.fs.s3a.path.style.access', 'true')
         .config('spark.hadoop.fs.s3a.impl',
                 'org.apache.hadoop.fs.s3a.S3AFileSystem')
-        .config('spark.hadoop.fs.s3a.connection.ssl.enabled', str(is_secure).lower())
+        .config('spark.hadoop.fs.s3a.connection.ssl.enabled',
+                str(is_secure).lower())
+        .config('spark.hadoop.fs.s3a.multipart.size',    '64m')
+        .config('spark.hadoop.fs.s3a.fast.upload',       'true')
+        .config('spark.hadoop.fs.s3a.fast.upload.buffer', 'bytebuffer')
 
-        # ── Network timeout (tránh lỗi khi machine busy) ─────
-        .config('spark.network.timeout', '800s')
-        .config('spark.executor.heartbeatInterval', '60s')
+        # ── Timeout ──────────────────────────────────────────
+        .config('spark.network.timeout',             '800s')
+        .config('spark.executor.heartbeatInterval',  '60s')
 
         .getOrCreate()
     )
 
-    spark.sparkContext.setLogLevel('WARN')  # Ẩn INFO logs spam
+    spark.sparkContext.setLogLevel('WARN')
     print(f'SparkSession created: {app_name}')
     print(f'MinIO endpoint: {spark_s3a_endpoint}')
+    print(f'Workers: 2 × 3 cores | Driver: {os.getenv("SPARK_DRIVER_MEMORY", "2g")} '
+          f'| Executor: {os.getenv("SPARK_EXECUTOR_MEMORY", "2g")}')
     return spark
 
 
-# Path helpers — dùng thay vì hardcode bucket names
+# ── Path helpers ─────────────────────────────────────────────
 def bronze_path(sub: str = '') -> str:
     bucket = os.getenv('BRONZE_BUCKET', 'electronics-bronze')
     return f's3a://{bucket}/{sub}' if sub else f's3a://{bucket}'

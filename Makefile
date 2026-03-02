@@ -7,15 +7,16 @@
 build:
 	docker compose build
 
-# Khởi động tất cả services (MinIO, Spark, Jupyter)
+# Khởi động tất cả services (MinIO, Spark 2 workers, Jupyter)
 up:
-	docker compose up -d --build
-	@echo ""
-	@echo "🚀 Services started:"
-	@echo "  Jupyter Notebook : http://localhost:8888"
-	@echo "  MinIO Console    : http://localhost:9001"
-	@echo "  Spark Master UI  : http://localhost:8080"
-	@echo "  Spark Worker UI  : http://localhost:8081"
+    docker compose up -d --build
+    @echo ""
+    @echo "🚀 Services started (2 workers):"
+    @echo "  Jupyter Notebook : http://localhost:8888"
+    @echo "  MinIO Console    : http://localhost:9001"
+    @echo "  Spark Master UI  : http://localhost:8080"
+    @echo "  Spark Worker 1   : http://localhost:8081"
+    @echo "  Spark Worker 2   : http://localhost:8082"
 
 # Dừng tất cả services (vẫn giữ lại data trong volumes)
 down:
