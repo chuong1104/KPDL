@@ -11,13 +11,13 @@
 
 | Thuộc tính | Giá trị |
 |---|---|
-| **Dự án** | Price Intelligence + Personalized Recommendation — Amazon Electronics |
+| **Dự án** | Personalized Recommendation — Amazon Electronics |
 | **Môn học** | CS246 — Mining Massive Datasets (Big Data) |
-| **Phiên bản** | v2.0 — 28/02/2026 — Cập nhật kiến trúc Hybrid 3 tầng |
+| **Phiên bản** | v2.1 — Cập nhật theo implementation thực tế |
 | **Thời gian** | 15 tuần — Bắt đầu: 03/03/2026 |
 | **Kiến trúc** | CF (ALS) → Knowledge-Based Filter (3 rules) → RQS Re-Ranker |
-| **Infrastructure** | Docker: Spark 3.5.1 + MinIO Medallion + Jupyter Lab — Fully Containerized |
-| **Trạng thái** | PRE-EXECUTION — Infrastructure DONE — Sẵn sàng Phase 1 |
+| **Infrastructure** | Docker Compose: Spark 3.5.1 (1 master + 2 workers × 3 cores) + MinIO + Jupyter Lab — 6 containers |
+| **Trạng thái** | Phase 1 DONE — Bronze + Silver ingestion hoàn thành — Sẵn sàng Phase 2 |
 
 ---
 
@@ -37,118 +37,115 @@ Xây dựng hệ thống khuyến nghị Hybrid 3 tầng có khả năng: (1) c�
 
 ### 1.2. Cấu trúc 4 phase tổng thể
 
-| Phase | Tên | Tuần | Mục tiêu chính | Deliverable chính |
-|:---:|---|:---:|---|---|
-| Phase 1 | Foundation & Ingestion | 1–3 | Setup pipeline, Bronze layer, EDA | Bronze Parquet + EDA Report |
-| Phase 2 | Feature Engineering | 4–7 | Silver/Gold layer, price parse, RQS signals, KB rules | Silver + Gold Parquet |
-| Phase 3 | Hybrid 3 Tầng Modeling | 8–11 | ALS (T1) + KB Filter (T3) + RQS (T2) + Ablation | Model artifacts + Analysis |
-| Phase 4 | Product & Evaluation | 12–15 | Dashboard, ablation study, báo cáo, presentation | Demo + Final Report |
+| Phase | Tên | Tuần | Mục tiêu chính | Deliverable chính | Trạng thái |
+|:---:|---|:---:|---|---|:---:|
+| Phase 1 | Foundation & Ingestion | 1–3 | Setup pipeline, Bronze + Silver layer, EDA | Silver Parquet + EDA Report | ✅ Done |
+| Phase 2 | Feature Engineering | 4–7 | NLP processing, Gold layer (ALS/RQS/KB) | Gold Parquet | ⏳ TODO |
+| Phase 3 | Hybrid 3 Tầng Modeling | 8–11 | ALS (T1) + KB Filter (T3) + RQS (T2) + Ablation | Model artifacts + Analysis | ⏳ TODO |
+| Phase 4 | Product & Evaluation | 12–15 | Dashboard, ablation study, báo cáo, presentation | Demo + Final Report | ⏳ TODO |
 
 ### 1.3. Sơ đồ pipeline tổng thể
 
-> **Luồng dữ liệu: Raw → Bronze → Silver → Gold → Hybrid 3 tầng → Dashboard**
+> **Luồng dữ liệu: HuggingFace → Bronze → Silver → Gold → Hybrid 3 tầng → Dashboard**
 
 ```
-[NGUỒN] McAuley Lab: Electronics.jsonl.gz (43.9M ratings) + meta_Electronics.jsonl.gz (1.6M items)
-    ↓ Spark read JSONL + Parquet convert
-[BRONZE] electronics-bronze/ — Dữ liệu thô, partition year/month, không transform
-    ↓ verified filter + time filter (2019–2023) + price parse + k-core + brand tier
-[SILVER] electronics-silver/ — ~15–18M reviews sạch, partition sub-category
-    ↓ Aggregate: price_rating_agg | product_features | copurchase_edges | RQS signals
-[GOLD] electronics-gold/ — Feature tables + model-ready aggregates + RQS pre-computed
+[NGUỒN] McAuley-Lab/Amazon-Reviews-2023 (HuggingFace Hub, streaming)             ✅
+    ↓ HuggingFace streaming → Pandas pre-clean → PyArrow → MinIO
+[BRONZE] electronics-bronze/ — Flat Parquet chunks (~300K rec/chunk, Snappy)       ✅
+    ↓ Spark MapReduce: filter + transform + dedup
+[SILVER] electronics-silver/reviews/ (partitioned year/month, zstd)                ✅
+         electronics-silver/metadata/ (4 partitions, price parsed, zstd)            ✅
+    ↓ NLP processing + Feature Engineering
+[GOLD] electronics-gold/ — ALS matrix + RQS features + KB catalog                 ⏳
     ↓ TẦNG 1: ALS training → user/item latent vectors
-    ↓ TẦNG 3: KB rules K-01/K-02/K-03 → hard filter 200→45 candidates
-    ↓ TẦNG 2: RQS computation → re-rank 45→Top 10
-[OUTPUT] Personalized Top 10 + Price-Satisfaction Analysis + Temporal Trend Alerts
+    ↓ TẦNG 3: KB rules K-01/K-02/K-03 → hard filter
+    ↓ TẦNG 2: RQS computation → re-rank → Top 10
+[OUTPUT] Personalized Top 10 per user                                              ⏳
     ↓ Visualization layer
-[DASHBOARD] Jupyter Plotly — Price Intelligence + Recommendation Demo
+[DASHBOARD] Streamlit — Recommendation Demo + Ablation Charts                     ⏳
 ```
 
 ---
 
-## PHASE 1: Foundation & Data Ingestion *(Tuần 1–3)*
+## PHASE 1: Foundation & Data Ingestion *(Tuần 1–3)* ✅ HOÀN THÀNH
 
-**Mục tiêu:** Thiết lập toàn bộ infrastructure, tải dữ liệu thô vào Bronze layer, thực hiện EDA ban đầu để xác nhận chất lượng dữ liệu — đặc biệt tỷ lệ null price và phân phối verified_purchase — trước khi bắt đầu feature engineering.
+**Mục tiêu:** Thiết lập toàn bộ infrastructure, tải dữ liệu thô vào Bronze layer qua HuggingFace streaming, transform Bronze → Silver qua Spark MapReduce, thực hiện EDA xác nhận chất lượng dữ liệu.
 
-### Tasks chi tiết
+### Implementation thực tế
 
-| ID | Task / Deliverable | Output cụ thể | Kỹ thuật CS246 / Tầng liên quan | Ưu tiên |
-|---|---|---|---|:---:|
-| T1.1 | Tải Electronics.jsonl.gz (~8GB) → Bronze Parquet | electronics-bronze/reviews/ partitioned year/month | Spark read JSONL, MapReduce write Parquet \| Tất cả tầng | P0 |
-| T1.2 | Tải meta_Electronics.jsonl.gz (~4GB) → Bronze Parquet | electronics-bronze/meta/ Parquet | Spark read JSONL, write Parquet \| T3 Knowledge Rules | P0 |
-| T1.3 | EDA: Phân phối rating theo năm 1996–2023 | Biểu đồ + bảng rating distribution | Spark groupBy + Matplotlib \| T1 ALS baseline | P0 |
-| T1.4 | EDA: Null rate của field price theo sub-category | Bảng null% per sub-cat — chọn top 10 sub-cat | Spark describe() + countNull() \| T3 K-01 | P0 |
-| T1.5 | EDA: Tỷ lệ verified_purchase toàn dataset | Tỷ lệ verified vs unverified — quyết định filter | Spark groupBy + count \| T2 Verified_Rate | P0 |
-| T1.6 | EDA: Phân phối helpful_vote — histogram + zero rate | Báo cáo zero rate → confirm log(1+x) strategy | Spark describe() + histogram \| T2 Helpful_Ratio | P1 |
-| T1.7 | EDA: Top 20 sub-category theo reviews + price coverage | Bảng chọn top 10 sub-cat cho scope | Spark groupBy + orderBy \| T3 scope | P1 |
-| T1.8 | EDA: Price format analysis — pattern types và parsable rate | Danh mục patterns + tỷ lệ parsable → confirm regex | Spark regex sampling \| T3 K-01 | P1 |
-| T1.9 | Xác nhận Bronze pipeline end-to-end, count check | NB 02_bronze_ingestion.ipynb pass toàn bộ | Integration test | P0 |
+> **Notebook chính:** `02_stream_to_silver.ipynb` — thực hiện cả Bronze ingestion lẫn Silver MapReduce trong cùng 1 notebook (không tách riêng Bronze/Silver như kế hoạch ban đầu).
+
+| Bước | Mô tả | Phương pháp thực tế |
+|---|---|---|
+| Bronze Reviews | HuggingFace → PyArrow chunks → MinIO | `download_and_chunk()` + `_pandas_pre_clean_reviews()` + `_write_chunk_pyarrow()` |
+| Bronze Metadata | HuggingFace → PyArrow chunks → MinIO | Tương tự, dùng `_pandas_pre_clean_meta()` |
+| Silver Reviews | Spark MapReduce: filter + transform + dedup | `mapreduce_reviews_to_silver()` — partitioned by `(review_year, review_month)`, zstd |
+| Silver Metadata | Spark MapReduce: price parse + dedup | `mapreduce_metadata_to_silver()` — 4 partitions, zstd |
+| Verification | Row count, null checks, file analysis | Cell 11: single Spark action + MinIO client |
 
 ### Checklist Phase 1 — Definition of Done
 
 | # | Checklist Item | Trạng thái |
 |:---:|---|:---:|
-| 1.1 | Bronze reviews: count() ≈ 43.9M rows, schema đúng 10 fields | **Chờ** |
-| 1.2 | Bronze meta: count() ≈ 1.6M rows, schema đúng 12 fields | **Chờ** |
-| 1.3 | EDA notebook chạy không lỗi, 5 phân tích đều có output | **Chờ** |
-| 1.4 | Đã xác nhận % null price và chọn top 10 sub-category có price rate cao nhất | **Chờ** |
-| 1.5 | Đã xác nhận tỷ lệ verified — quyết định dùng filter T3 hay ratio T2 | **Chờ** |
-| 1.6 | Đã xác nhận zero rate helpful_vote → confirm log(1+x) formula cho RQS | **Chờ** |
-| 1.7 | Source Analysis Document v2.0 reviewed và approved bởi toàn nhóm | **✓ Xong** |
-| 1.8 | Kế hoạch thực thi v2.0 (file này) reviewed và approved | **Chờ** |
-| 1.9 | README.md cập nhật với hướng dẫn Phase 1 | **Chờ** |
+| 1.1 | Infrastructure: 6 Docker containers healthy (minio, minio-init, spark-master, 2 workers, jupyter) | **✓ Xong** |
+| 1.2 | MinIO 3 buckets (electronics-bronze, electronics-silver, electronics-gold) | **✓ Xong** |
+| 1.3 | Spark ↔ MinIO read/write Parquet verified (`01_setup_verify.ipynb`) | **✓ Xong** |
+| 1.4 | Bronze review chunks tại `electronics-bronze/reviews_chunks/` | **✓ Xong** |
+| 1.5 | Bronze metadata chunks tại `electronics-bronze/metadata_chunks/` | **✓ Xong** |
+| 1.6 | Silver reviews partitioned by `(review_year, review_month)`, zstd | **✓ Xong** |
+| 1.7 | Silver metadata with `price_numeric` parsed, 4 partitions, zstd | **✓ Xong** |
+| 1.8 | Verification: row count, null checks, rating range — PASS | **✓ Xong** |
+| 1.9 | EDA notebook (`00-source-analyst.ipynb`): schema, ratings, temporal, DQ | **✓ Xong** |
+| 1.10 | Source Analysis Document reviewed | **✓ Xong** |
 
-> **Rủi ro Phase 1**
+> **Ghi chú so với kế hoạch ban đầu:**
 >
-> - **RR-01 [CAO]** Tải ~12 GB chậm: wget với resume flag `-c`; tải ngoài giờ cao điểm
-> - **RR-02 [CAO]** Null price > 50%: Scope reduction top 5 sub-cat; hoặc bổ sung Appliances dataset
-> - **RR-03 [TB]** Spark OOM khi đọc toàn bộ JSONL: Đọc partition by year; tăng executor.memory
+> - Ingestion dùng HuggingFace streaming + PyArrow trực tiếp (không phải `spark.read.json()` trên JSONL.GZ)
+> - Bronze là flat Parquet chunks (không partition theo year/month)
+> - Review schema 8 fields (bỏ `asin`, `images`), Metadata schema 11 fields (bỏ `images`, `videos`, `details`)
+> - Silver chưa áp dụng 5-core filter, verified filter, hay time window 2019–2023 (sẽ làm ở Phase 2 nếu cần)
+> - Bronze + Silver gộp trong 1 notebook `02_stream_to_silver.ipynb` (không tách riêng 2 notebooks)
 
 ---
 
-## PHASE 2: Feature Engineering & Silver/Gold Layer *(Tuần 4–7)*
+## PHASE 2: Feature Engineering & Gold Layer *(Tuần 4–7)* ⏳
 
-**Mục tiêu:** Biến đổi Bronze thô thành Silver sạch và Gold feature tables sẵn sàng cho cả 3 tầng. Đây là phase kỹ thuật nặng nhất — chất lượng Silver/Gold quyết định trực tiếp chất lượng của T1 (ALS), T2 (RQS), và T3 (KB rules).
+**Mục tiêu:** Xây dựng Gold feature tables từ Silver layer, sẵn sàng cho cả 3 tầng. Silver layer đã hoàn thành ở Phase 1 (reviews partitioned by year/month + metadata with price parsed). Phase 2 tập trung vào NLP processing và Gold layer.
 
-### Tasks chi tiết — Silver Layer
+### Tasks chi tiết — NLP Processing
 
-| ID | Task / Deliverable | Output cụ thể | Kỹ thuật CS246 / Tầng liên quan | Ưu tiên |
+| ID | Task / Deliverable | Output cụ thể | Module | Ưu tiên |
 |---|---|---|---|:---:|
-| T2.1 | Price parsing: string → float (parse "$XX.XX", loại range) | Silver: price_numeric float column | Spark UDF + Regex \| T3 K-01 | P0 |
-| T2.2 | K-core filtering: user ≥ 5, item ≥ 10 (iterative, max 5 rounds) | Silver filtered ~15–18M rows | Spark iterative join + filter \| T1 ALS | P0 |
-| T2.3 | Verified filter (True only) + time filter 2019–2023 | Silver: clean base dataset | Spark where() \| T2+T3 | P0 |
-| T2.4 | Sub-category extraction từ categories array → chuẩn hóa | Silver: sub_category column chuẩn | Spark explode + regex \| T3 scope | P1 |
-| T2.5 | Price bucket per sub-category (8 buckets, dynamic thresholds) | Silver: price_bucket column | Spark QuantileDiscretizer \| T3 K-01 | P0 |
-| T2.6 | Dedup reviews: remove (user_id, parent_asin, timestamp) trùng | Silver: no duplicate rows | Spark dropDuplicates \| T1 data quality | P1 |
+| T2.1 | Text preprocessing: tokenize, stopword, lemma | Cleaned text columns | `src/nlp/text_pipeline.py` | P0 |
+| T2.2 | ABSA: aspect extraction trên review text | Aspect-sentiment pairs | `src/nlp/absa.py` + `config/absa_seeds.yaml` | P0 |
+| T2.3 | TF-IDF vectorization cho text similarity | TF-IDF feature vectors | `src/nlp/tfidf.py` | P1 |
+
+**Notebook:** `04_silver_nlp.ipynb`
 
 ### Tasks chi tiết — Gold Layer (3 tầng)
 
-| ID | Task / Deliverable | Output cụ thể | Kỹ thuật CS246 / Tầng liên quan | Ưu tiên |
+| ID | Task / Deliverable | Output cụ thể | Module | Ưu tiên |
 |---|---|---|---|:---:|
-| T2.7 | RQS Signal Table: Weighted_Rating per product per year | Gold/rqs_signals/weighted_rating.parquet | Spark window + exp recency weight \| T2 RQS | P0 |
-| T2.8 | RQS Signal Table: Helpful_Ratio = log(1+helpful)/log(1+total) | Gold/rqs_signals/helpful_ratio.parquet | Spark agg \| T2 RQS | P0 |
-| T2.9 | RQS Signal Table: Verified_Rate per product | Gold/rqs_signals/verified_rate.parquet | Spark agg \| T2 RQS | P0 |
-| T2.10 | RQS Signal Table: Rating_Stability = 1/(1+std_by_year) | Gold/rqs_signals/stability.parquet | Spark groupBy year + std \| T2 RQS | P0 |
-| T2.11 | Pre-compute RQS = 0.40×WR + 0.25×VR + 0.20×HR + 0.15×RS | Gold/rqs_scores/rqs_final.parquet | Spark join 4 tables + formula \| T2 | P0 |
-| T2.12 | Brand Tier classification: Premium/Mid/Budget từ store field | Gold/product_features/brand_tier.parquet | Spark lookup + regex \| T3 K-03 | P0 |
-| T2.13 | Product Features table: price_numeric, rating_number, brand_tier | Gold/product_features/kb_rules.parquet | Spark join meta + computed fields \| T3 | P0 |
-| T2.14 | Price-Rating aggregation: mean/std per (sub_cat, price_bucket, year) | Gold/price_rating_agg/*.parquet | MapReduce groupBy agg \| BQ-02 analysis | P1 |
-| T2.15 | Co-purchase edge list từ bought_together | Gold/copurchase_edges/*.parquet | Spark explode + join \| T1 PageRank | P1 |
+| T2.4 | ALS Matrix: StringIndexer userId/parent_asin → int | Gold/als_matrix/ (userIdx, itemIdx, rating) | `src/models/als_model.py` | P0 |
+| T2.5 | RQS: Weighted_Rating (recency-weighted avg rating) | Gold/rqs_features/ | `src/evaluation/metrics.py` | P0 |
+| T2.6 | RQS: Helpful_Ratio = log(1+helpful)/log(1+total) | Gold/rqs_features/ | `src/evaluation/metrics.py` | P0 |
+| T2.7 | RQS: Verified_Rate = count(verified)/total | Gold/rqs_features/ | `src/evaluation/metrics.py` | P0 |
+| T2.8 | RQS: Rating_Stability = 1/(1+std_by_year) | Gold/rqs_features/ | `src/evaluation/metrics.py` | P0 |
+| T2.9 | Pre-compute RQS final score | Gold/rqs_scores/ | `src/evaluation/metrics.py` | P0 |
+| T2.10 | KB: Price imputation + brand tier classification | Gold/product_features/ | `src/preprocessing/transformer.py` | P0 |
+| T2.11 | KB: Rules table (price_numeric, rating_number, brand_tier) | Gold/product_features/kb_rules.parquet | `src/preprocessing/quality.py` | P0 |
+| T2.12 | Co-purchase edge list từ bought_together | Gold/copurchase_edges/ | — | P1 |
 
 ### Checklist Phase 2 — Definition of Done
 
 | # | Checklist Item | Trạng thái |
 |:---:|---|:---:|
-| 2.1 | Silver count: 15M–18M rows sau toàn bộ filters | **Chờ** |
-| 2.2 | Price parse: ≥ 60% items có price_numeric hợp lệ trong top 10 sub-cat | **Chờ** |
-| 2.3 | Gold RQS: 4 signal tables đã tạo, coverage ≥ 300K products | **Chờ** |
-| 2.4 | Gold RQS: rqs_final.parquet đã pre-compute cho ≥ 300K products | **Chờ** |
-| 2.5 | Gold KB: brand_tier coverage ≥ 80% products (Premium/Mid/Budget/Unknown) | **Chờ** |
-| 2.6 | Gold KB: kb_rules.parquet có đủ 3 fields: price_numeric, rating_number, brand_tier | **Chờ** |
-| 2.7 | Gold: copurchase_edges ≥ 500K edges cho PageRank | **Chờ** |
-| 2.8 | Notebook 03_silver_cleaning.ipynb chạy < 45 phút trên Docker cluster | **Chờ** |
-| 2.9 | Sample inspection: 20 sản phẩm Wireless Earbuds đã có đủ RQS và KB fields | **Chờ** |
-| 2.10 | Path conventions MinIO thống nhất và documented trong README | **Chờ** |
+| 2.1 | NLP pipeline: ABSA + TF-IDF trên review text (`04_silver_nlp.ipynb`) | **Chờ** |
+| 2.2 | Gold ALS matrix: userIdx, itemIdx không null | **Chờ** |
+| 2.3 | Gold RQS: 4 signal tables + rqs_final score | **Chờ** |
+| 2.4 | Gold KB: kb_rules.parquet với price_numeric + rating_number + brand_tier | **Chờ** |
+| 2.5 | Brand tier coverage ≥ 80% | **Chờ** |
+| 2.6 | Co-purchase edges cho PageRank | **Chờ** |
 
 ---
 
@@ -255,13 +252,13 @@ Xây dựng hệ thống khuyến nghị Hybrid 3 tầng có khả năng: (1) c�
 
 | Tuần | Phase | Task chính | Milestone |
 |:---:|---|---|---|
-| 1 | Phase 1 | Tải Electronics.jsonl.gz → Bronze reviews | |
-| 2 | Phase 1 | Tải meta → Bronze; EDA rating distribution + price null | |
-| 3 | Phase 1 | EDA helpful_vote, verified, sub-cat; chọn top 10 scope | **M1:** Bronze Layer + EDA Report DONE |
-| 4 | Phase 2 | Price parsing; k-core; verified+time filter → Silver | |
+| 1 | Phase 1 | Setup Docker infra + HuggingFace Bronze ingestion (reviews) | |
+| 2 | Phase 1 | Bronze metadata + Silver MapReduce (reviews + metadata) | |
+| 3 | Phase 1 | Verification + EDA (`00-source-analyst.ipynb`) | **M1:** Bronze + Silver Layer + EDA ✅ DONE |
+| 4 | Phase 2 | NLP: ABSA + TF-IDF trên review text (`04_silver_nlp.ipynb`) | |
 | 5 | Phase 2 | RQS signal tables: Weighted_Rating + Helpful_Ratio | |
 | 6 | Phase 2 | RQS: Verified_Rate + Stability + pre-compute RQS final | |
-| 7 | Phase 2 | Brand tier classification; KB rules table; copurchase edges | **M2:** Silver + Gold Layer DONE |
+| 7 | Phase 2 | Brand tier classification; KB rules table; copurchase edges | **M2:** Gold Layer DONE |
 | 8 | Phase 3 | ALS training + hyperparameter tuning | |
 | 9 | Phase 3 | KB Filter: implement K-01 + K-02 + K-03 + test pipeline | |
 | 10 | Phase 3 | RQS validation + streaming windowed RQS | |
@@ -326,33 +323,35 @@ Xây dựng hệ thống khuyến nghị Hybrid 3 tầng có khả năng: (1) c�
 
 ## 5. Cấu trúc Notebook & Naming Convention
 
-| Notebook | File | Phase | Nội dung | Tầng liên quan |
-|---|---|:---:|---|---|
-| NB-01 | 01_setup_verify.ipynb | Setup | Test MinIO + Spark — PASS | Infrastructure |
-| NB-02 | 02_bronze_ingestion.ipynb | Phase 1 | Download → Bronze Parquet | All tầng (nguồn) |
-| NB-03 | 03_silver_cleaning.ipynb | Phase 2 | Silver layer cleaning + dedup + standardization | T1+T2+T3 prep |
-| NB-04 | 04_silver_nlp.ipynb | Phase 2 | NLP processing: ABSA, TF-IDF, text pipeline | T2 — RQS + NLP |
-| NB-05 | 05_gold_als.ipynb | Phase 3 | ALS train + evaluate + cold-start | T1 — CF |
-| NB-06 | 06_gold_lsh.ipynb | Phase 3 | LSH similarity clusters + product matching | T1+T3 support |
-| NB-07 | 07_gold_pagerank.ipynb | Phase 3 | PageRank authority scoring trên co-purchase graph | T3 hỗ trợ |
-| NB-08 | 08_evaluation.ipynb | Phase 3-4 | Ablation study 4 configs + metrics + final evaluation | Contribution + Academic |
+| Notebook | File | Phase | Nội dung | Trạng thái |
+|---|---|:---:|---|:---:|
+| NB-00 | 00-source-analyst.ipynb | Setup | Phân tích & xác minh nguồn dữ liệu HuggingFace | ✅ |
+| NB-01 | 01_setup_verify.ipynb | Setup | Smoke test: Spark ↔ MinIO read/write Parquet | ✅ |
+| NB-02 | 02_stream_to_silver.ipynb | Phase 1 | Bronze ingestion (HF→PyArrow→MinIO) + Silver MapReduce | ✅ |
+| NB-04 | 04_silver_nlp.ipynb | Phase 2 | NLP processing: ABSA, TF-IDF, text pipeline | ⏳ |
+| NB-05 | 05_gold_als.ipynb | Phase 3 | ALS train + evaluate + cold-start | ⏳ |
+| NB-06 | 06_gold_lsh.ipynb | Phase 3 | LSH similarity clusters + product matching | ⏳ |
+| NB-07 | 07_gold_pagerank.ipynb | Phase 3 | PageRank authority scoring trên co-purchase graph | ⏳ |
+| NB-08 | 08_evaluation.ipynb | Phase 3-4 | Ablation study 4 configs + metrics + final evaluation | ⏳ |
 
-### MinIO Path Conventions v2.0
+> **Ghi chú:** Không có NB-03. Bronze + Silver gộp trong NB-02.
+
+### MinIO Path Conventions (Thực tế)
 
 ```
-Bronze:   s3a://electronics-bronze/reviews/year={YYYY}/month={MM}/*.parquet
-Bronze:   s3a://electronics-bronze/meta/*.parquet
+Bronze:   s3a://electronics-bronze/reviews_chunks/chunk_NNNN.parquet     (flat, Snappy)
+Bronze:   s3a://electronics-bronze/metadata_chunks/chunk_NNNN.parquet    (flat, Snappy)
 
-Silver:   s3a://electronics-silver/reviews_clean/sub_category={CAT}/*.parquet
+Silver:   s3a://electronics-silver/reviews/review_year=YYYY/review_month=MM/*.parquet  (zstd)
+Silver:   s3a://electronics-silver/metadata/*.parquet                                   (zstd)
 
-Gold/RQS: s3a://electronics-gold/rqs_signals/{weighted_rating|helpful_ratio|verified_rate|stability}/
-Gold/RQS: s3a://electronics-gold/rqs_scores/rqs_final.parquet
-
-Gold/KB:  s3a://electronics-gold/product_features/kb_rules.parquet
-Gold/KB:  s3a://electronics-gold/product_features/brand_tier.parquet
-
-Gold/Models:  s3a://electronics-gold/models/als_v{N}/ (user_factors + item_factors)
-Gold/Support: s3a://electronics-gold/pagerank_scores/ | copurchase_edges/ | popularity/
+Gold/ALS:     s3a://electronics-gold/als_matrix/                         (chưa tạo)
+Gold/RQS:     s3a://electronics-gold/rqs_features/                       (chưa tạo)
+Gold/RQS:     s3a://electronics-gold/rqs_scores/rqs_final.parquet        (chưa tạo)
+Gold/KB:      s3a://electronics-gold/product_features/kb_rules.parquet   (chưa tạo)
+Gold/Models:  s3a://electronics-gold/models/                             (chưa tạo)
+Gold/Support: s3a://electronics-gold/pagerank_scores/                    (chưa tạo)
+Gold/Support: s3a://electronics-gold/copurchase_edges/                   (chưa tạo)
 ```
 
 ---
@@ -365,35 +364,35 @@ Gold/Support: s3a://electronics-gold/pagerank_scores/ | copurchase_edges/ | popu
 
 | # | Checklist Item | Trạng thái |
 |:---:|---|:---:|
-| I-01 | docker-compose up -d: 5 containers (minio, minio-init, spark-master, spark-worker, jupyter) — 4 services healthy | **✓ Xong** |
-| I-02 | MinIO console localhost:9001: 3 buckets tạo đủ (electronics-bronze, electronics-silver, electronics-gold) | **✓ Xong** |
-| I-03 | Spark Master UI localhost:8080 accessible | **✓ Xong** |
+| I-01 | docker-compose up: 6 containers (minio, minio-init, spark-master, spark-worker-1, spark-worker-2, jupyter) | **✓ Xong** |
+| I-02 | MinIO console: 3 buckets (electronics-bronze, electronics-silver, electronics-gold) | **✓ Xong** |
+| I-03 | Spark Master UI localhost:8080 + 2 workers (8081, 8082) active | **✓ Xong** |
 | I-04 | Jupyter Lab localhost:8888 accessible | **✓ Xong** |
-| I-05 | NB-01 pass: Spark ↔ MinIO read/write Parquet hoạt động | **✓ Xong** |
-| I-06 | Source Analysis Document v2.0 approved | **✓ Xong** |
-| I-07 | Project Execution Plan v2.0 (file này) approved toàn nhóm | **Chờ** |
+| I-05 | NB-01 pass: Spark ↔ MinIO read/write Parquet | **✓ Xong** |
+| I-06 | Source Analysis Document approved | **✓ Xong** |
+| I-07 | README.md với hướng dẫn setup + pipeline | **✓ Xong** |
 
-### Phase 1 — Data Ingestion
-
-| # | Checklist Item | Trạng thái |
-|:---:|---|:---:|
-| P1-01 | Electronics.jsonl.gz (~8GB) tải về và extract thành công | **Chờ** |
-| P1-02 | meta_Electronics.jsonl.gz (~4GB) tải về và extract thành công | **Chờ** |
-| P1-03 | Bronze reviews count() ≈ 43.9M, schema 10 fields đúng | **Chờ** |
-| P1-04 | Bronze meta count() ≈ 1.6M, schema 12 fields đúng | **Chờ** |
-| P1-05 | EDA: null price rate documented, top 10 sub-cat đã chọn | **Chờ** |
-| P1-06 | EDA: helpful_vote zero rate → confirmed log(1+x) strategy | **Chờ** |
-
-### Phase 2 — Feature Engineering
+### Phase 1 — Data Ingestion ✅
 
 | # | Checklist Item | Trạng thái |
 |:---:|---|:---:|
-| P2-01 | Silver: ≥ 15M rows sau toàn bộ filters | **Chờ** |
-| P2-02 | Price parse ≥ 60% coverage trong top 10 sub-cat | **Chờ** |
-| P2-03 | Gold RQS: 4 signal tables + rqs_final.parquet coverage ≥ 300K products | **Chờ** |
-| P2-04 | Gold KB: kb_rules.parquet có price_numeric + rating_number + brand_tier | **Chờ** |
-| P2-05 | Brand tier coverage ≥ 80% (Unknown tier cho phần còn lại) | **Chờ** |
-| P2-06 | Copurchase edges ≥ 500K edges | **Chờ** |
+| P1-01 | Bronze review chunks (HuggingFace → PyArrow → MinIO) | **✓ Xong** |
+| P1-02 | Bronze metadata chunks (HuggingFace → PyArrow → MinIO) | **✓ Xong** |
+| P1-03 | Silver reviews (Spark MapReduce, review schema 8 fields, partitioned year/month, zstd) | **✓ Xong** |
+| P1-04 | Silver metadata (Spark MapReduce, 11 fields, price parsed, 4 partitions, zstd) | **✓ Xong** |
+| P1-05 | Verification: row count, null checks, rating range, file analysis — PASS | **✓ Xong** |
+| P1-06 | EDA: `00-source-analyst.ipynb` — schema, ratings, temporal, data quality | **✓ Xong** |
+
+### Phase 2 — Feature Engineering ⏳
+
+| # | Checklist Item | Trạng thái |
+|:---:|---|:---:|
+| P2-01 | NLP: ABSA + TF-IDF (`04_silver_nlp.ipynb`) | **Chờ** |
+| P2-02 | Gold ALS matrix (userIdx, itemIdx, rating) | **Chờ** |
+| P2-03 | Gold RQS: 4 signal tables + rqs_final | **Chờ** |
+| P2-04 | Gold KB: kb_rules.parquet (price + rating_number + brand_tier) | **Chờ** |
+| P2-05 | Brand tier coverage ≥ 80% | **Chờ** |
+| P2-06 | Copurchase edges cho PageRank | **Chờ** |
 
 ### Phase 3 — Hybrid 3 Tầng + Ablation
 
@@ -423,33 +422,36 @@ Gold/Support: s3a://electronics-gold/pagerank_scores/ | copurchase_edges/ | popu
 
 ## 7. Cấu trúc Mã nguồn (Source Code)
 
-Dự án tổ chức source code theo mô-đun chức năng, mapping trực tiếp với từng phase và tầng trong pipeline:
+Dự án tổ chức source code theo mô-đun chức năng. Hiện tại chỉ `src/config/` đã triển khai, còn lại là stub. Logic ingestion nằm inline trong notebook `02_stream_to_silver.ipynb`.
 
-| File / Module | Phase / Tầng | Chức năng |
-|---|---|---|
-| `src/config/spark_config.py` | Infrastructure | SparkSession + MinIO S3A · path helpers (bronze_path, silver_path, gold_path) |
-| `src/config/minio_config.py` | Infrastructure | MinIO client · ensure_buckets_exist() |
-| `src/ingestion/hf_streamer.py` | Phase 1 | HuggingFace dataset streaming |
-| `src/ingestion/bronze_writer.py` | Phase 1 | Bronze Parquet writer |
-| `src/preprocessing/cleaner.py` | Phase 2 · Silver | Dedup, null handling, type casting |
-| `src/preprocessing/quality.py` | Phase 2 · Silver | Data quality checks |
-| `src/preprocessing/transformer.py` | Phase 2 · Gold | Feature transformations |
-| `src/nlp/absa.py` | Phase 2 · T2 | ABSA (Aspect-Based Sentiment Analysis) |
-| `src/nlp/text_pipeline.py` | Phase 2 · T2 | NLP text preprocessing |
-| `src/nlp/tfidf.py` | Phase 2 · T2 | TF-IDF vectorization |
-| `src/models/als_model.py` | Phase 3 · T1 | ALS Collaborative Filtering |
-| `src/models/lsh_model.py` | Phase 3 · T1+T3 | LSH MinHash similarity |
-| `src/models/pagerank.py` | Phase 3 · T3 | PageRank authority |
-| `src/evaluation/metrics.py` | Phase 3-4 | NDCG, Precision, MAP, ablation comparison |
-| `config/pipeline_config.yaml` | All Phases | Cấu hình pipeline chung |
-| `config/absa_seeds.yaml` | Phase 2 | Seed words cho ABSA |
-| `app/app.py` | Phase 4 | Streamlit entry point |
-| `app/components/recommender.py` | Phase 4 | Recommendation UI |
-| `app/components/sentiment_radar.py` | Phase 4 | Sentiment radar chart |
-| `app/components/trend_chart.py` | Phase 4 | Temporal trend chart |
-| `tests/test_absa.py` | Testing | Unit test ABSA |
-| `tests/test_cleaner.py` | Testing | Unit test cleaner |
-| `tests/test_metrics.py` | Testing | Unit test metrics |
+| File / Module | Trạng thái | Phase / Tầng | Chức năng |
+|---|:---:|---|---|
+| `src/config/spark_config.py` | ✅ | Infrastructure | SparkSession (2g mem, 6 slots, S3A, zstd, AQE) + path helpers |
+| `src/config/minio_config.py` | ✅ | Infrastructure | MinIO client (auto Docker/local) + ensure_buckets_exist() |
+| `src/ingestion/hf_streamer.py` | ⏳ | Phase 1 | HuggingFace streaming (logic hiện inline trong NB-02) |
+| `src/ingestion/bronze_writer.py` | ⏳ | Phase 1 | Bronze writer (logic hiện inline trong NB-02) |
+| `src/preprocessing/cleaner.py` | ⏳ | Phase 2 | Dedup, null handling, type casting |
+| `src/preprocessing/quality.py` | ⏳ | Phase 2 | Data quality checks |
+| `src/preprocessing/transformer.py` | ⏳ | Phase 2 | Feature transformations cho Gold |
+| `src/nlp/absa.py` | ⏳ | Phase 2 · T2 | ABSA (Aspect-Based Sentiment Analysis) |
+| `src/nlp/text_pipeline.py` | ⏳ | Phase 2 · T2 | NLP text preprocessing |
+| `src/nlp/tfidf.py` | ⏳ | Phase 2 · T2 | TF-IDF vectorization |
+| `src/models/als_model.py` | ⏳ | Phase 3 · T1 | ALS Collaborative Filtering |
+| `src/models/lsh_model.py` | ⏳ | Phase 3 · T1+T3 | LSH MinHash similarity |
+| `src/models/pagerank.py` | ⏳ | Phase 3 · T3 | PageRank authority scoring |
+| `src/evaluation/metrics.py` | ⏳ | Phase 3-4 | NDCG, Precision, MAP, ablation |
+| `config/pipeline_config.yaml` | ⏳ | All Phases | Cấu hình pipeline chung |
+| `config/absa_seeds.yaml` | ⏳ | Phase 2 | Seed words cho ABSA |
+| `app/app.py` | ⏳ | Phase 4 | Streamlit entry point |
+| `app/components/recommender.py` | ⏳ | Phase 4 | Recommendation UI |
+| `app/components/sentiment_radar.py` | ⏳ | Phase 4 | Sentiment radar chart |
+| `app/components/trend_chart.py` | ⏳ | Phase 4 | Temporal trend chart |
+| `tests/test-datasource.py` | ✅ | Testing | HuggingFace streaming test |
+| `tests/test_absa.py` | ⏳ | Testing | Unit test ABSA |
+| `tests/test_cleaner.py` | ⏳ | Testing | Unit test cleaner |
+| `tests/test_metrics.py` | ⏳ | Testing | Unit test metrics |
+
+> ✅ = Đã triển khai | ⏳ = Stub/chưa triển khai
 
 ---
 

@@ -17,7 +17,7 @@
 | **Dataset** | Amazon Reviews'23 — Electronics (McAuley Lab, UCSD) |
 | **Quy mô** | ~18.3M Users \| 1.61M Items \| ~43.9M Ratings \| ~3.2B R_Tokens \| ~289M M_Tokens |
 | **Kiến trúc** | Hybrid 3 Tầng: CF (ALS) → Lọc Tri thức Miền → Chấm điểm Chất lượng (RQS) |
-| **Infrastructure** | Docker: Apache Spark 3.5.1 (pyspark==3.5.0) + MinIO Medallion (electronics-bronze / electronics-silver / electronics-gold) + Jupyter Lab · Fully Containerized (5 containers) |
+| **Infrastructure** | Docker Compose: Spark 3.5.1 (1 master + 2 workers × 3 cores, pyspark==3.5.0) + MinIO Medallion (electronics-bronze / electronics-silver / electronics-gold) + Jupyter Lab · Fully Containerized (6 containers: minio, minio-init, spark-master, spark-worker-1, spark-worker-2, jupyter) |
 | **Phiên bản** | v2.0 — Cập nhật kiến trúc Hybrid 3 tầng — 28/02/2026 |
 | **Tác giả** | Nhóm CS246 — Học kỳ 2, 2025–2026 |
 
@@ -174,6 +174,8 @@ RQS = 0.40 × Weighted_Rating + 0.25 × Verified_Rate + 0.20 × Helpful_Ratio + 
 **File:** `Electronics.jsonl.gz` | HuggingFace: `McAuley-Lab/Amazon-Reviews-2023 / raw_review_Electronics`
 
 > ✅ **Kết quả xác minh:** Schema Review khớp hoàn toàn với tài liệu (10/10 fields, đúng kiểu dữ liệu)
+>
+> ℹ️ **Silver layer:** Chỉ giữ 8/10 fields: `rating`, `title`, `text`, `parent_asin`, `user_id`, `timestamp`, `helpful_vote`, `verified_purchase`. Bỏ `asin` (dùng `parent_asin` làm join key) và `images` (94.5% trống).
 
 | Field | Kiểu | Verified | Tầng dùng | Vai trò cụ thể |
 |---|---|:---:|:---:|---|
@@ -210,6 +212,8 @@ verified_purchase = True
 
 > ✅ **Kết quả xác minh:** 14/14 fields khớp kiểu dữ liệu.
 > ⚠️ Phát hiện 2 fields thừa không có trong tài liệu: `subtitle`, `author`
+>
+> ℹ️ **Silver layer:** Giữ 11/14 fields chính. Bỏ `images` (không dùng), `videos` (không dùng), `details` (dict phức tạp). Cũng bỏ `subtitle` và `author`. Thêm `price_numeric` (parsed từ `price`).
 
 | Field | Kiểu | Verified | Tầng dùng | Vai trò cụ thể |
 |---|---|:---:|:---:|---|
@@ -438,9 +442,10 @@ Tất cả 200,000 records đều có rating trong range [1.0, 5.0] ✅
 > ⚠️ Quality Score 84.7 < 85 chủ yếu do **images field trống 94.5%** (expected behavior, không phải lỗi dữ liệu thực sự). Nếu loại trừ images field, Quality Score ≈ **94+/100** → dữ liệu rất sạch.
 >
 > **Kết luận:** Dữ liệu đủ chất lượng cho Bronze ingestion. Các vấn đề cần xử lý ở Silver layer:
-> - Dedup 0.32% duplicate pairs
-> - Xử lý 5.82% `very_short_text` (có thể loại hoặc gán flag)
-> - Null handling cho metadata `price` (58.2%) và `description` (42.0%)
+> - Dedup 0.32% duplicate pairs → ✅ Đã xử lý trong Silver MapReduce (`02_stream_to_silver.ipynb`)
+> - Xử lý 5.82% `very_short_text` (có thể loại hoặc gán flag) → ⏳ Phase 2
+> - Null handling cho metadata `price` (58.2%) và `description` (42.0%) → ⏳ Phase 2 (price parsed trong Silver, nhưng imputation chưa làm)
+> - Loại fields không dùng: `images` (reviews), `asin` (dùng `parent_asin`), `images`/`videos`/`details` (metadata) → ✅ Đã loại trong Silver
 
 ---
 
@@ -462,4 +467,8 @@ Tất cả 200,000 records đều có rating trong range [1.0, 5.0] ✅
 | 12 | Duplicate rate | — | 0.32% | ✅ |
 | 13 | Data Quality Score | — | 84.7 / 100 | ⚠️ |
 
-> **Kết luận tổng thể:** Dữ liệu Amazon Electronics Reviews 2023 đã được xác minh qua code thực tế. Schema khớp hoàn toàn. Các con số quy mô cơ bản đúng ở mức ±5%. Chênh lệch token counts do phương pháp đếm khác nhau. Dữ liệu đủ chất lượng và quy mô cho hệ thống Hybrid 3 tầng. Cần lưu ý xử lý null rates cao ở metadata (`price` 58.2%, `description` 42.0%) trong Silver layer.
+> **Kết luận tổng thể:** Dữ liệu Amazon Electronics Reviews 2023 đã được xác minh qua code thực tế. Schema khớp hoàn toàn. Các con số quy mô cơ bản đúng ở mức ±5%. Chênh lệch token counts do phương pháp đếm khác nhau. Dữ liệu đủ chất lượng và quy mô cho hệ thống Hybrid 3 tầng. Cần lưu ý xử lý null rates cao ở metadata (`price` 58.2%, `description` 42.0%) trong Silver/Gold layer.
+>
+> **Trạng thái implementation:**
+> - ✅ Phase 1 DONE: Bronze ingestion (HuggingFace → PyArrow → MinIO) + Silver MapReduce (Spark, partitioned, zstd) hoàn thành trong `02_stream_to_silver.ipynb`
+> - ⏳ Phase 2–4: NLP processing, Gold layer, Hybrid 3 tầng modeling, Dashboard — chưa bắt đầu
